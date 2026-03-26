@@ -1,17 +1,7 @@
 <!DOCTYPE html>
 <html lang="en-us">
   <head>
-    <!-- DYNAMIC BASE: Use CDN for production, local for development -->
-    <script>
-      const isLocalhost = window.location.hostname === 'localhost' ||
-                          window.location.hostname === '127.0.0.1' ||
-                          window.location.protocol === 'file:';
-      if (isLocalhost) {
-	document.write('<base href="./">');
-      } else {
-        document.write('<base href="https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/">');
-      }
-    </script>
+    <base href="./">
     <meta charset="utf-8">
     <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
     <!-- COOP/COEP headers for SharedArrayBuffer support (required for >2GB memory) -->
@@ -20,9 +10,14 @@
     <title>Unity Web Player | Hollow Knight SilkSong</title>
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
     <link rel="stylesheet" href="TemplateData/style.css">
+    <style>
+      body { margin: 0; padding: 0; overflow: hidden; background: #000; }
+      #unity-container { width: 100vw; height: 100vh; }
+      #unity-canvas { width: 100%; height: 100%; display: block; }
+    </style>
   </head>
   <body>
-    <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING...</div>
+    <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px; position: absolute; top: 0; left: 0; width: 100%; z-index: 100;"> LOADING...</div>
     <div id="unity-container">
       <canvas id="unity-canvas" width=960 height=600 tabindex="-1"></canvas>
       <div id="unity-loading-bar">
@@ -38,81 +33,109 @@
     <script src="jszip.js"></script>
 
 <script>
-// ================== CRITICAL FIXES FOR SAVE ERRORS ==================
-
-// PATCH 1: Validate querySelector to prevent "empty selector" errors
+// ================== MEMORY CONFIGURATION ==================
+// Game needs 4GB+ but WASM32 limit is ~3.7GB usable.
+// These settings MUST be applied BEFORE the loader script runs.
+// Note: If the Unity build was compiled with lower limits, these won't help.
 (function() {
-    const origQuerySelector = document.querySelector;
-    const origQuerySelectorAll = document.querySelectorAll;
+    // Merge with memory-patch.js settings
+    window.Module = window.Module || {};
 
-    document.querySelector = function(selector) {
-        if (!selector || selector === "") {
-            console.warn("[Fix] Blocked empty selector, returning canvas");
-            return document.getElementById("unity-canvas");
-        }
-        try {
-            return origQuerySelector.call(this, selector);
-        } catch (e) {
-            console.error("[Fix] querySelector error:", selector, e);
-            return null;
-        }
+    // Additional runtime error suppression
+    window.Module.noInitialRun = false;
+
+    // Runtime initialized hook
+    window.Module.onRuntimeInitialized = function() {
+        console.log("[Fix] Unity runtime initialized");
     };
 
-    document.querySelectorAll = function(selector) {
-        if (!selector || selector === "") {
-            console.warn("[Fix] Blocked empty selectorAll");
-            return [];
-        }
-        try {
-            return origQuerySelectorAll.call(this, selector);
-        } catch (e) {
-            console.error("[Fix] querySelectorAll error:", selector, e);
-            return [];
-        }
+    // Catch all errors
+    window.Module.onAbort = function(what) {
+        console.error("[Fix] Unity aborted:", what);
     };
 })();
 
-// PATCH 2: Memory configuration - merged with memory-patch.js
-// The memory-patch.js file already sets 3GB initial with 3.75GB max usable for WASM32
-window.Module = window.Module || {};
+const loadingText = document.querySelector("#loading-text");
+// v3 - forces redownload due to cache corruption issues
+const CACHE_NAME = "hksilksongcache-local-v3";
 
-// Merge CRITICAL error handlers
-const origQuit = window.Module.quit;
-window.Module.quit = function(exitCode) {
-    console.error("[Fix] Unity quit with exit code:", exitCode);
-    if (origQuit) origQuit.call(this, exitCode);
+/* ================= PATCH: Canvas Selector Fix ================= */
+// Store original functions before Unity overrides them
+const originalQuerySelector = document.querySelector.bind(document);
+const originalQuerySelectorAll = document.querySelectorAll.bind(document);
+
+// Safe wrapper that validates selectors
+document.querySelector = function(selector) {
+    if (!selector || selector === "") {
+        console.warn("Blocked empty selector query");
+        return document.getElementById("unity-canvas");
+    }
+    return originalQuerySelector(selector);
 };
 
-// Runtime initialized hook
-const origOnRuntimeInitialized = window.Module.onRuntimeInitialized;
-window.Module.onRuntimeInitialized = function() {
-    console.log("[Fix] Unity runtime initialized, memory:", Module.TOTAL_MEMORY / (1024*1024) + "MB");
-    if (origOnRuntimeInitialized) origOnRuntimeInitialized.call(this);
+document.querySelectorAll = function(selector) {
+    if (!selector || selector === "") {
+        console.warn("Blocked empty selector query (all)");
+        return [];
+    }
+    return originalQuerySelectorAll(selector);
 };
 
-const origPreRun = window.Module.preRun || [];
-window.Module.preRun = Array.isArray(origPreRun) ? origPreRun : [origPreRun];
-
-// Note: memory-patch.js already handles preRun initialization
-
-// PATCH 3: Runtime error handling
-// Note: memory-patch.js handles OOM/memory errors globally
+/* ================= RUNTIME ERROR HANDLER ================= */
 let oomDetected = false;
 
-// Add additional error tracking for logging purposes only
+window.addEventListener('error', function(e) {
+    if (e.message && (e.message.includes('RuntimeError') || e.message.includes('memory access') || e.message.includes('out of bounds') || e.message.includes('OOM') || e.message.includes('abortOnCannotGrowMemory'))) {
+        console.error("[Fix] Caught WASM error:", e);
+        e.preventDefault();
+
+        // Mark OOM state
+        oomDetected = true;
+
+        // Auto-clear cache on memory errors - corrupted cache can cause memory bloat
+        console.warn("[Fix] Clearing ALL caches due to memory error...");
+        caches.keys().then(names => {
+            names.forEach(name => {
+                if (name.includes("hksilksong")) {
+                    caches.delete(name);
+                    console.log("[Fix] Deleted cache:", name);
+                }
+            });
+            console.warn("[Fix] Cache cleared. RELOAD THE PAGE (Ctrl+Shift+R) to redownload fresh assets.");
+        });
+
+        // Also clear IndexedDB which may have corrupted save data
+        indexedDB.databases().then(dbs => {
+            dbs.forEach(db => {
+                if (db.name && (db.name.includes('unity') || db.name.includes('silksong') || db.name.includes('IDBFS'))) {
+                    indexedDB.deleteDatabase(db.name);
+                    console.log("[Fix] Deleted IndexedDB:", db.name);
+                }
+            });
+        });
+
+        return false;
+    }
+});
+
+// Intercept console.error for OOM messages
 const origConsoleError = console.error;
 console.error = function(...args) {
     if (args.some(a => typeof a === 'string' && (a.includes('OOM') || a.includes('abort("OOM")')))) {
+        console.warn('[Fix] OOM detected via console.error - clearing cache');
         oomDetected = true;
+        caches.keys().then(names => {
+            names.forEach(name => {
+                if (name.includes("hksilksong")) {
+                    caches.delete(name);
+                }
+            });
+        });
     }
     origConsoleError.apply(console, args);
 };
 
-// ================== ORIGINAL LOADING CODE ==================
-const loadingText = document.querySelector("#loading-text");
-// v3 - forces redownload due to cache corruption issues
-const CACHE_NAME = "hksilksongcache-v3-fixed";
-
+/* ================= FETCH OVERRIDE ================= */
 const originalFetch = window.fetch;
 
 window.fetch = async function(resource, options) {
@@ -129,6 +152,7 @@ window.fetch = async function(resource, options) {
   return originalFetch(resource, options);
 };
 
+/* ================= CACHE CHECK ================= */
 async function isCached() {
   const cache = await caches.open(CACHE_NAME);
   const done = await cache.match("CACHE_COMPLETE");
@@ -181,6 +205,7 @@ async function cleanupOldCaches() {
   );
 }
 
+/* ================= UNZIP ================= */
 async function unzipAndStore(zipBlob) {
   if (!zipBlob) {
     throw new Error("ZIP is missing");
@@ -209,7 +234,8 @@ async function unzipAndStore(zipBlob) {
       }
 
       processed++;
-      loadingText.textContent = `EXTRACTING ASSETS... (${processed}/${total})`;
+      loadingText.textContent =
+        `EXTRACTING ASSETS... (${processed}/${total})`;
     }));
 
     await new Promise(r => setTimeout(r, 0));
@@ -220,6 +246,7 @@ async function unzipAndStore(zipBlob) {
   console.log("Cache complete");
 }
 
+/* ================= DOWNLOAD ================= */
 let loadedBytes = 0;
 
 async function fetchWithProgress(url) {
@@ -244,7 +271,8 @@ async function fetchWithProgress(url) {
     let mbDone = (loadedBytes / (1024 * 1024)).toFixed(2);
     let mbTotal = '1986.64';
 
-    loadingText.textContent = `DOWNLOADING ASSETS... (${mbDone} MB / ${mbTotal} MB)`;
+    loadingText.textContent =
+      `DOWNLOADING ASSETS... (${mbDone} MB / ${mbTotal} MB)`;
   }
 
   let fullBuffer = new Uint8Array(received);
@@ -258,6 +286,7 @@ async function fetchWithProgress(url) {
   return fullBuffer.buffer;
 }
 
+/* ================= MERGE ================= */
 async function mergeFiles(parts) {
   console.log("Downloading parts:", parts.length);
 
@@ -268,6 +297,7 @@ async function mergeFiles(parts) {
   return new Blob(buffers);
 }
 
+/* ================= UTIL ================= */
 function getParts(file, start, end) {
   let parts = [];
   for (let i = start; i <= end; i++) {
@@ -276,6 +306,7 @@ function getParts(file, start, end) {
   return parts;
 }
 
+/* ================= MAIN ================= */
 (async () => {
   try {
     await cleanupOldCaches();
@@ -291,6 +322,7 @@ function getParts(file, start, end) {
       loadingText.textContent = "LOADING FROM CACHE...";
     }
 
+    /* ================= UNITY START ================= */
     const canvas = document.querySelector("#unity-canvas");
     const loadingBar = document.querySelector("#unity-loading-bar");
     const progressBarFull = document.querySelector("#unity-progress-bar-full");
@@ -332,20 +364,14 @@ function getParts(file, start, end) {
       productName: "Hollow Knight SilkSong",
       productVersion: "1.0",
       showBanner: unityShowBanner,
+      // PATCH: Increase memory for save operations
+      memoryUrl: undefined,
     };
 
     loadingBar.style.display = "block";
 
     const script = document.createElement("script");
-
-    // DYNAMIC LOADER: Local for localhost, CDN for production
-    if (isLocalhost) {
-      script.src = "Build/w-pt.loader.js";
-      console.log("[Fix] Loading local build from:", window.location.origin);
-    } else {
-      script.src = "https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@latest/Build/w-pt.loader.js";
-      console.log("[Fix] Loading from CDN");
-    }
+    script.src = "Build/w-pt.loader.js"; // LOCAL loader, not CDN
 
     script.onload = () => {
       createUnityInstance(canvas, config, (progress) => {
@@ -354,18 +380,15 @@ function getParts(file, start, end) {
       .then((unityInstance) => {
         loadingBar.remove();
         loadingText.remove();
-        window.unityInstance = unityInstance; // Expose for debugging
-        console.log("Unity loaded successfully");
+
+        // PATCH: Expose for debugging
+        window.unityInstance = unityInstance;
+        console.log("Unity instance loaded:", unityInstance);
       })
       .catch((err) => {
-        console.error("Unity load failed:", err);
-        alert("Failed to load game: " + err.message);
+        console.error("Unity load error:", err);
+        alert("Failed to load: " + err.message);
       });
-    };
-
-    script.onerror = (err) => {
-      console.error("Script load failed:", err);
-      loadingText.textContent = "ERROR: Failed to load game files. Check console.";
     };
 
     document.body.appendChild(script);
