@@ -6,9 +6,13 @@
       const isLocalhost = window.location.hostname === 'localhost' ||
                           window.location.hostname === '127.0.0.1' ||
                           window.location.protocol === 'file:';
+<<<<<<< HEAD
+      if (!isLocalhost) {
+=======
       if (isLocalhost) {
 	document.write('<base href="./">');
       } else {
+>>>>>>> acabfc8 (sw)
         document.write('<base href="https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/">');
       }
     </script>
@@ -35,6 +39,10 @@
     </div>
     <!-- Memory patch MUST load before jszip and Unity loader -->
     <script src="js/memory-patch.js"></script>
+    <!-- Save system - direct IndexedDB storage to avoid OOM -->
+    <script src="js/save-bridge.js"></script>
+    <script src="js/save-intercept.js"></script>
+    <script src="js/save-loader.js"></script>
     <script src="jszip.js"></script>
 
 <script>
@@ -72,6 +80,43 @@
     };
 })();
 
+<<<<<<< HEAD
+// PATCH 2: Wrap dynCall to catch signature mismatches
+window.Module = window.Module || {};
+const origPreRun = window.Module.preRun || [];
+window.Module.preRun = Array.isArray(origPreRun) ? origPreRun : [origPreRun];
+
+window.Module.preRun.push(function() {
+    console.log("[Fix] Initializing patches...");
+
+    // Override dynCall to catch errors gracefully
+    const originalDynCall = Module.dynCall;
+    if (originalDynCall) {
+        Module.dynCall = function(sig, ptr) {
+            try {
+                return originalDynCall.apply(this, arguments);
+            } catch (e) {
+                console.error("[Fix] Caught dynCall error:", sig, e.message);
+                return 0;
+            }
+        };
+    }
+});
+
+// PATCH 3: Catch and handle runtime errors
+window.addEventListener('error', function(e) {
+    if (e.message && (e.message.includes('RuntimeError') || e.message.includes('memory access'))) {
+        console.error("[Fix] Caught WASM error:", e);
+        e.preventDefault();
+        // Don't alert the user for these errors
+        return false;
+    }
+});
+
+// ================== ORIGINAL LOADING CODE ==================
+const loadingText = document.querySelector("#loading-text");
+const CACHE_NAME = "hksilksongcache-v2-fixed";
+=======
 // PATCH 2: Memory configuration - merged with memory-patch.js
 // The memory-patch.js file already sets 3GB initial with 3.75GB max usable for WASM32
 window.Module = window.Module || {};
@@ -112,6 +157,7 @@ console.error = function(...args) {
 const loadingText = document.querySelector("#loading-text");
 // v3 - forces redownload due to cache corruption issues
 const CACHE_NAME = "hksilksongcache-v3-fixed";
+>>>>>>> acabfc8 (sw)
 
 const originalFetch = window.fetch;
 
